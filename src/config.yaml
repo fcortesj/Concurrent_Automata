@@ -1,0 +1,44 @@
+- automata: One
+  description: "First automata"
+  alpha: [a,b,c]
+  states: [A,B,C]
+  start: A
+  final: [C]
+  delta:
+  - node: A
+    trans:
+    - in: a
+      next: B
+    - in: b
+      next: A
+  - node: B
+    trans:
+    - in: a
+      next: B
+    - in: b
+      next: A
+    - in: c
+      next: C
+  - node: C
+    trans:
+- automata: Two
+  description: "Second automata"
+  alpha: [aa,bb,cc]
+  states: [A,B]
+  start: A
+  final: [A,B]
+  delta:
+  - node: A
+    trans:
+    - in: aa
+      next: B
+    - in: bb
+      next: A
+    - in: cc
+      next: B
+  - node: B
+    trans:
+    - in: aa
+      next: B
+    - in: bb
+      next: A

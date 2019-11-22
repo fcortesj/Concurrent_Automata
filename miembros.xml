@@ -1,0 +1,16 @@
+<grupo>
+    <nombre>racorts</nombre>
+    <repositorio>https://github.com/fcortesj/racorts</repositorio>
+    <miembro>
+        <nombre>Rafael Villegas Michel</nombre>
+        <codigo>201710012010</codigo>
+        <grupo>031</grupo>
+        <email>rvillegasm@eafit.edu.co</email>
+    </miembro>
+    <miembro>
+        <nombre>Felipe Cortes Jaramillo</nombre>
+        <codigo>201710015010</codigo>
+        <grupo>031</grupo>
+        <email>fcortesj@eafit.edu.co</email>
+    </miembro>
+</grupo>
