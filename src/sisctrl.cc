@@ -7,9 +7,12 @@
 #include <map>
 #include <vector>
 
+#include <cstdio>
+
 #include <yaml-cpp/yaml.h>
 #include "edge.h"
 
+// STATES PIPE MANAGEMENT
 void assign_intern_pipes(std::map<std::string, std::vector<Edge>> &transitions, std::string automaton_name, std::string state_name, YAML::Node config);
 void assign_error_pipes(std::map<std::string, std::map<std::string, int[2]>> &error_pipes, std::string automaton_name, std::string state_name, YAML::Node config);
 void assign_ending_pipes(std::map<std::string, std::map<std::string, int[2]>> &ending_pipes, std::string automaton_name, std::string state_name, YAML::Node config);
@@ -17,10 +20,18 @@ void assign_initial_pipes(std::map<std::string, std::map<std::string, int[2]>> &
 void create_error_pipes(std::map<std::string, std::map<std::string, int[2]>> &error_pipes, std::string automaton_name, std::string state_name);
 void create_ending_pipes(std::map<std::string, std::map<std::string, int[2]>> &error_pipes, std::string automaton_name, std::string state_name);
 void create_initial_pipes(std::map<std::string, std::map<std::string, int[2]>> &initial_pipes, std::string automaton_name, std::string state_name);
+// STATES LOGIC
+void initial_state_logic(std::map<std::string, std::map<std::string, int[2]>> &initial_pipes, std::map<std::string, std::map<std::string, int[2]>> &error_pipes, std::map<std::string, std::map<std::string, int[2]>> &ending_pipes, std::map<std::string, std::vector<Edge>> &transitions, std::string automaton_name, std::string state_name, std::vector<std::string> current_final_states);
+void intermediate_state_logic(std::map<std::string, std::vector<Edge>> &transitions, std::map<std::string, std::map<std::string, int[2]>> &error_pipes, std::map<std::string, std::map<std::string, int[2]>> &ending_pipes, std::string automaton_name, std::string state_name, std::vector<std::string> current_final_states);
+bool analyze_prefix(std::string trans_msg, std::string buff_msg);
 
-void close_control_intern_pipes(std::map<std::string, std::vector<Edge>> &transitions, YAML::Node config);
-
-
+// SISCTRL PIPE MANAGEMENT
+void close_sisctrl_intern_pipes(std::map<std::string, std::vector<Edge>> &transitions, YAML::Node config);
+void close_sisctrl_error_pipes(std::map<std::string, std::map<std::string, int[2]>> &error_pipes, YAML::Node config);
+void close_sisctrl_ending_pipes(std::map<std::string, std::map<std::string, int[2]>> &ending_pipes, YAML::Node config);
+void close_sisctrl_initial_pipes(std::map<std::string, std::map<std::string, int[2]>> &initial_pipes, YAML::Node config);
+// SISCTRL LOGIC
+void get_user_input(std::string &input_message);
 
 int main(int argc, char *argv[]) {
 
@@ -29,12 +40,22 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
+    // Get input from user
+    std::string input_message;
+    get_user_input(input_message);
+    YAML::Node input_cmd = YAML::Load(input_message);
+
+    std::string command = input_cmd["cmd"].as<std::string>();
+    std::string msg = input_cmd["msg"].as<std::string>();
+    printf("Command %s, msg %s\n", command.c_str(), msg.c_str());
+    //--------------------
+
     YAML::Node config = YAML::LoadFile(argv[1]);
     const int NUM_AUTOMATA = config.size();
 
     // process related data
     // state ids matrix
-    std::vector<pid_t> state_pids[NUM_AUTOMATA];
+    std::vector<pid_t> state_pids;
     // transitions
     std::map<std::string, std::vector<Edge>> transitions;
     // error pipes
@@ -98,17 +119,24 @@ int main(int argc, char *argv[]) {
         
         const int NUM_NODES = config[i]["delta"].size();
         std::string automaton_name = config[i]["automata"].as<std::string>();
+        std::string current_start_state = config[i]["start"].as<std::string>();
+        std::vector<std::string> current_final_states;
+        for (size_t p = 0; p < config[i]["final"].size(); p++) {
+            std::string final_state = config[i]["final"][p].as<std::string>();
+            current_final_states.push_back(final_state);
+        }
     
         // Loop through the states
         for (size_t j = 0; j < NUM_NODES; j++) {
             std::string state_name = config[i]["delta"][j]["node"].as<std::string>();
 
-            // Create the process and...
+            // CREATE THE PROCESS and...
             pid_t j_state = fork();
-            // The father puts it inside the pid matrix
+            // The father puts it inside the pid vector
+            // and closes his unnecessary pipes
             if (j_state > 0) {
-                state_pids[i].push_back(j_state);
-                close_control_intern_pipes(transitions, config);
+                state_pids.push_back(j_state);
+                std::cout << "creating process " << j_state << std::endl;
             }
             // State logic
             else if (j_state == 0) {
@@ -118,8 +146,21 @@ int main(int argc, char *argv[]) {
                 assign_ending_pipes(error_pipes, automaton_name, state_name, config);
                 assign_initial_pipes(initial_pipes, automaton_name, state_name, config);
 
-                // Do stuff...
+                // start checking the qualities of the state
+                if (current_start_state == state_name) {
+                    // This is an initial state
+                    while (true) {
+                        initial_state_logic(initial_pipes, error_pipes, ending_pipes, transitions, automaton_name, state_name, current_final_states);
+                        intermediate_state_logic(transitions, ending_pipes, error_pipes, automaton_name, state_name, current_final_states);
+                    }
+                }
+                else {
+                    while (true) {
+                        intermediate_state_logic(transitions, ending_pipes, error_pipes, automaton_name, state_name, current_final_states);
+                    }
+                }
 
+                // END
                 exit(EXIT_SUCCESS);
             }
             // Error creating the new process
@@ -129,22 +170,311 @@ int main(int argc, char *argv[]) {
             }
             
         }
-
     }
 
-    // Wait for processes to finish
-    for (size_t i = 0; i < NUM_AUTOMATA; i++) {
-        const int NUM_NODES = config[i]["delta"].size();
-        int status;
+    // FATHER LOGIC
+    
+    // Close unnecessary pipes
+    close_sisctrl_intern_pipes(transitions, config);
+    close_sisctrl_error_pipes(error_pipes, config);
+    close_sisctrl_ending_pipes(ending_pipes, config);
+    close_sisctrl_initial_pipes(initial_pipes, config);
 
-        for (size_t j = 0; j < NUM_NODES; j++) {
-            waitpid(state_pids[i][j], &status, 0);
+    // Write to the initial states
+    for (size_t i = 0; i < NUM_AUTOMATA; i++) {
+        
+        const int NUM_NODES = config[i]["delta"].size();
+        std::string automaton_name = config[i]["automata"].as<std::string>();
+        std::string current_start_state = config[i]["start"].as<std::string>();
+
+        const char *message = input_message.c_str();
+        size_t n = strlen(message);
+
+        // Create the Yaml command
+        YAML::Emitter out;
+        out << YAML::Flow;
+        out << YAML::BeginMap;
+        out << YAML::Key << "recog";
+        out << YAML::Value << "";
+        out << YAML::Key << "rest";
+        out << YAML::Value << msg;
+        out << YAML::EndMap;
+        
+        const char *msg_to_send = out.c_str();
+        if (write(initial_pipes[automaton_name][current_start_state][1], msg_to_send, strlen(msg_to_send)) < 0) {
+            std::cerr << "ERROR!: could not wrtie initial message" << std::endl;
         }
     }
 
+    // Listen to the ending pipes
+    while (true) {
+        for (size_t i = 0; i < NUM_AUTOMATA; i++) {
+        
+            const int NUM_NODES = config[i]["delta"].size();
+            std::string automaton_name = config[i]["automata"].as<std::string>();
+            
+            for (size_t j = 0; j < config[i]["final"].size(); j++) {
+
+                std::string current_final = config[i]["final"][j].as<std::string>();
+
+                char c;
+                std::string buffer = "";
+                while (read(ending_pipes[automaton_name][current_final][0], &c, 1) > 0) {
+                    buffer += c;
+                }
+                if (c == '}') {
+                    printf("Sisctrl recieved: %s, from automaton: %s\n", buffer.c_str(), automaton_name.c_str());
+                }
+            }
+        }
+    }
+
+    // Listen to the error pipes
+    while (true) {
+        for (size_t i = 0; i < NUM_AUTOMATA; i++) {
+        
+            const int NUM_NODES = config[i]["delta"].size();
+            std::string automaton_name = config[i]["automata"].as<std::string>();
+            
+            for (size_t j = 0; j < config[i]["states"].size(); j++) {
+
+                std::string current_state = config[i]["states"][j].as<std::string>();
+
+                char c;
+                std::string buffer = "";
+                while (read(error_pipes[automaton_name][current_state][0], &c, 1) > 0) {
+                    buffer += c;
+                }
+                if (c == '}') {
+                    printf("Sisctrl recieved: %s\n", buffer.c_str());
+                }
+            }
+        }
+    }
+
+    for (int pid : state_pids) {
+        int status;
+        waitpid(pid, &status, 0);
+    }
 }
 
-void close_control_intern_pipes(std::map<std::string, std::vector<Edge>> &transitions, YAML::Node config) {
+bool analyze_prefix(std::string trans_msg, std::string buff_msg) {
+    if (trans_msg.length() > buff_msg.length()) {
+        return false;
+    }
+    else {
+        std::string prefix = buff_msg.substr(0, trans_msg.length());
+        if (prefix == trans_msg) {
+            return true;
+        }
+        else {
+            return false;
+        }
+    }
+}
+
+
+void initial_state_logic(std::map<std::string, std::map<std::string, int[2]>> &initial_pipes, 
+                         std::map<std::string, std::map<std::string, int[2]>> &error_pipes,
+                         std::map<std::string, std::map<std::string, int[2]>> &ending_pipes,
+                         std::map<std::string, std::vector<Edge>> &transitions,
+                         std::string automaton_name,
+                         std::string state_name,
+                         std::vector<std::string> current_final_states) {
+
+    char c;
+    std::string buffer = "";
+    while (read(initial_pipes[automaton_name][state_name][0], &c, 1) > 0) {
+        // std::cout << "State " << state_name << " from automaton " << automaton_name << " got: " << c << std::endl;
+        buffer += c;
+    }
+    if (c == '}') {
+
+        YAML::Node buffer_msg = YAML::Load(buffer);
+        std::string recog = buffer_msg["recog"].as<std::string>();
+        std::string rest = buffer_msg["rest"].as<std::string>();
+
+        printf("Automaton %s, state %s (initial), got: %s \n", automaton_name.c_str(), state_name.c_str(), buffer.c_str());
+        // std::cout << "Automaton " << automaton_name << " state " << state_name << "(initial) got: " << buffer << std::endl;
+        // Send the message to the other states
+        bool msg_sent = false;
+        for (Edge &trans : transitions[automaton_name]) {
+            if (trans.origin == state_name) {
+                if (analyze_prefix(trans.message, rest) == true) {
+                    // read the rest prefix into recog
+                    std::string new_recog = recog + rest.substr(0, trans.message.length());
+                    std::string new_rest = rest.substr(trans.message.length(), rest.length());
+                    // generate Yaml
+                    YAML::Emitter out;
+                    out << YAML::Flow;
+                    out << YAML::BeginMap;
+                    out << YAML::Key << "recog";
+                    out << YAML::Value << new_recog;
+                    out << YAML::Key << "rest";
+                    out << YAML::Value << new_rest;
+                    out << YAML::EndMap;
+                    const char *msg_to_send = out.c_str();
+                    write(trans.pip[1], msg_to_send, strlen(msg_to_send));
+                    msg_sent = true;
+                    break;
+                }
+            }
+        }
+
+        bool am_i_final = false;
+        for (std::string final_state : current_final_states) {
+            if (final_state == state_name) {
+                am_i_final = true;
+            }
+        }
+
+        if (am_i_final && rest == "") {
+
+            // generate Yaml
+            YAML::Emitter out;
+            out << YAML::Flow;
+            out << YAML::BeginMap;
+            out << YAML::Key << "codterm";
+            out << YAML::Value << 0;
+            out << YAML::Key << "recog";
+            out << YAML::Value << recog;
+            out << YAML::Key << "rest";
+            out << YAML::Value << rest;
+            out << YAML::EndMap;
+            const char *msg_to_send = out.c_str();
+            write(ending_pipes[automaton_name][state_name][1], msg_to_send, strlen(msg_to_send));
+            msg_sent = true;
+        }
+
+        if (!msg_sent) {
+            YAML::Emitter out;
+            out << YAML::Flow;
+            out << YAML::BeginMap;
+            out << YAML::Key << "codterm";
+            out << YAML::Value << 1;
+            out << YAML::Key << "recog";
+            out << YAML::Value << recog;
+            out << YAML::Key << "rest";
+            out << YAML::Value << rest;
+            out << YAML::EndMap;
+            const char *msg_to_send = out.c_str();
+            if (write(error_pipes[automaton_name][state_name][1], msg_to_send, strlen(msg_to_send)) < 0) {
+                std::cerr << "ERROR!: could not write to error pipe" << std::endl;
+            }
+        }
+
+        // flush the buffer
+        c = 0;
+        buffer = "";
+    }
+}
+
+void intermediate_state_logic(std::map<std::string, std::vector<Edge>> &transitions, 
+                              std::map<std::string, std::map<std::string, int[2]>> &ending_pipes,
+                              std::map<std::string, std::map<std::string, int[2]>> &error_pipes,
+                              std::string automaton_name,
+                              std::string state_name, 
+                              std::vector<std::string> current_final_states) {
+
+    for (Edge &trans : transitions[automaton_name]) {
+        if (trans.destination == state_name) {
+            char c;
+            std::string buffer = "";
+            while (read(trans.pip[0], &c, 1) > 0) {
+                buffer += c;
+            }
+            if (c == '}') {
+
+                printf("Automaton %s, state %s, got: %s\n", automaton_name.c_str(), state_name.c_str(), buffer.c_str());
+
+                YAML::Node buffer_msg = YAML::Load(buffer);
+                std::string recog = buffer_msg["recog"].as<std::string>();
+                std::string rest = buffer_msg["rest"].as<std::string>();
+
+                bool msg_sent = false;
+
+                for (Edge &inner_trans : transitions[automaton_name]) {
+                    if (inner_trans.origin == state_name) {
+                        if (analyze_prefix(inner_trans.message, rest) == true) {
+                            // read the rest prefix into recog
+                            std::string new_recog = recog + rest.substr(0, inner_trans.message.length());
+                            std::string new_rest = rest.substr(inner_trans.message.length(), rest.length());
+                            // generate Yaml
+                            YAML::Emitter out;
+                            out << YAML::Flow;
+                            out << YAML::BeginMap;
+                            out << YAML::Key << "recog";
+                            out << YAML::Value << new_recog;
+                            out << YAML::Key << "rest";
+                            out << YAML::Value << new_rest;
+                            out << YAML::EndMap;
+                            const char *msg_to_send = out.c_str();
+                            write(inner_trans.pip[1], msg_to_send, strlen(msg_to_send));
+                            msg_sent = true;
+                            break;
+                        }
+                    }
+                }
+
+                bool am_i_final = false;
+                for (std::string final_state : current_final_states) {
+                    if (final_state == state_name) {
+                        am_i_final = true;
+                    }
+                }
+
+                if (am_i_final && rest == "") {
+
+                    // generate Yaml
+                    YAML::Emitter out;
+                    out << YAML::Flow;
+                    out << YAML::BeginMap;
+                    out << YAML::Key << "codterm";
+                    out << YAML::Value << 0;
+                    out << YAML::Key << "recog";
+                    out << YAML::Value << recog;
+                    out << YAML::Key << "rest";
+                    out << YAML::Value << rest;
+                    out << YAML::EndMap;
+                    const char *msg_to_send = out.c_str();
+                    write(ending_pipes[automaton_name][state_name][1], msg_to_send, strlen(msg_to_send));
+                    msg_sent = true;
+                }
+
+                if (!msg_sent) {
+                    YAML::Emitter out;
+                    out << YAML::Flow;
+                    out << YAML::BeginMap;
+                    out << YAML::Key << "codterm";
+                    out << YAML::Value << 1;
+                    out << YAML::Key << "recog";
+                    out << YAML::Value << recog;
+                    out << YAML::Key << "rest";
+                    out << YAML::Value << rest;
+                    out << YAML::EndMap;
+                    const char *msg_to_send = out.c_str();
+                    if (write(error_pipes[automaton_name][state_name][1], msg_to_send, strlen(msg_to_send)) < 0) {
+                        std::cerr << "ERROR!: could not write to error pipe" << std::endl;
+                    }
+                }
+
+                // flush the buffer
+                c = 0;
+                buffer = "";
+
+            }
+        }
+    }
+}
+
+
+void get_user_input(std::string &input_message) {
+    std::cout << "Input a character string to be parsed: ";
+    std::getline(std::cin, input_message);
+}
+
+
+void close_sisctrl_intern_pipes(std::map<std::string, std::vector<Edge>> &transitions, YAML::Node config) {
     for (size_t i = 0; i < config.size(); i++) {
         std::string current_name = config[i]["automata"].as<std::string>();
         for (size_t j = 0; j < transitions[current_name].size(); j++) {
@@ -155,6 +485,37 @@ void close_control_intern_pipes(std::map<std::string, std::vector<Edge>> &transi
         }
     }
 }
+
+void close_sisctrl_error_pipes(std::map<std::string, std::map<std::string, int[2]>> &error_pipes, YAML::Node config) {
+    for (size_t i = 0; i < config.size(); i++) {
+        std::string current_name = config[i]["automata"].as<std::string>();
+        for (size_t j = 0; j < error_pipes[current_name].size(); j++) {
+            std::string current_state = config[i]["delta"][j]["node"].as<std::string>();
+            close(error_pipes[current_name][current_state][1]);
+        }
+    }
+}
+
+void close_sisctrl_ending_pipes(std::map<std::string, std::map<std::string, int[2]>> &ending_pipes, YAML::Node config) {
+    for (size_t i = 0; i < config.size(); i++) {
+        std::string current_name = config[i]["automata"].as<std::string>();
+        for (size_t j = 0; j < ending_pipes[current_name].size(); j++) {
+            std::string current_state = config[i]["delta"][j]["node"].as<std::string>();
+            close(ending_pipes[current_name][current_state][1]);
+        }
+    }
+}
+
+void close_sisctrl_initial_pipes(std::map<std::string, std::map<std::string, int[2]>> &initial_pipes, YAML::Node config) {
+    for (size_t i = 0; i < config.size(); i++) {
+        std::string current_name = config[i]["automata"].as<std::string>();
+        for (size_t j = 0; j < initial_pipes[current_name].size(); j++) {
+            std::string current_state = config[i]["delta"][j]["node"].as<std::string>();
+            close(initial_pipes[current_name][current_state][0]);
+        }
+    }
+}
+
 
 /**
  * Closes unnecessary intern pipes
@@ -259,11 +620,27 @@ void create_error_pipes(std::map<std::string, std::map<std::string, int[2]>> &er
         std::cerr << "ERROR!: pipe could not be created." << std::endl;
         exit(EXIT_FAILURE);
     }
+    if (fcntl(error_pipes[automaton_name][state_name][0], F_SETFL, O_NONBLOCK) < 0) {
+        std::cerr << "ERROR!: pipe could not be set to non-blocking" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+    if (fcntl(error_pipes[automaton_name][state_name][1], F_SETFL, O_NONBLOCK) < 0) {
+        std::cerr << "ERROR!: pipe could not be set to non-blocking" << std::endl;
+        exit(EXIT_FAILURE);
+    }
 }
 
 void create_ending_pipes(std::map<std::string, std::map<std::string, int[2]>> &ending_pipes, std::string automaton_name, std::string state_name) {
     if (pipe(ending_pipes[automaton_name][state_name]) == -1) {
         std::cerr << "ERROR!: pipe could not be created." << std::endl;
+        exit(EXIT_FAILURE);
+    }
+    if (fcntl(ending_pipes[automaton_name][state_name][0], F_SETFL, O_NONBLOCK) < 0) {
+        std::cerr << "ERROR!: pipe could not be set to non-blocking" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+    if (fcntl(ending_pipes[automaton_name][state_name][1], F_SETFL, O_NONBLOCK) < 0) {
+        std::cerr << "ERROR!: pipe could not be set to non-blocking" << std::endl;
         exit(EXIT_FAILURE);
     }
 }
@@ -273,7 +650,14 @@ void create_initial_pipes(std::map<std::string, std::map<std::string, int[2]>> &
         std::cerr << "ERROR!: pipe could not be created." << std::endl;
         exit(EXIT_FAILURE);
     }
+    if (fcntl(initial_pipes[automaton_name][state_name][0], F_SETFL, O_NONBLOCK) < 0) {
+        std::cerr << "ERROR!: pipe could not be set to non-blocking" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+    if (fcntl(initial_pipes[automaton_name][state_name][1], F_SETFL, O_NONBLOCK) < 0) {
+        std::cerr << "ERROR!: pipe could not be set to non-blocking" << std::endl;
+        exit(EXIT_FAILURE);
+    }
 }
-// crear tuberias entes de los pocesos
-// procesos hijos deciden cuales necesitan y cierran las que no
-// 
+
+

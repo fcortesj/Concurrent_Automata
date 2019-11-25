@@ -1,4 +1,5 @@
 #include <unistd.h>
+#include <fcntl.h>
 #include <string>
 
 struct Edge {
@@ -13,6 +14,14 @@ struct Edge {
         // create the pipe
         if (pipe(pip) == -1) {
             std::cerr << "ERROR!: pipe could not be created." << std::endl;
+            exit(EXIT_FAILURE);
+        }
+        if (fcntl(pip[0], F_SETFL, O_NONBLOCK) < 0) {
+            std::cerr << "ERROR!: pipe could not be set to non-blocking" << std::endl;
+            exit(EXIT_FAILURE);
+        }
+        if (fcntl(pip[1], F_SETFL, O_NONBLOCK) < 0) {
+            std::cerr << "ERROR!: pipe could not be set to non-blocking" << std::endl;
             exit(EXIT_FAILURE);
         }
     }
