@@ -54,7 +54,7 @@ int main(int argc, char *argv[]) {
 
     std::string command = input_cmd["cmd"].as<std::string>();
     std::string msg = input_cmd["msg"].as<std::string>();
-    printf("Command %s, msg %s\n", command.c_str(), msg.c_str());
+    // printf("Command %s, msg %s\n", command.c_str(), msg.c_str());
     //--------------------
 
     YAML::Node config = YAML::LoadFile(argv[1]);
@@ -143,7 +143,7 @@ int main(int argc, char *argv[]) {
             // and closes his unnecessary pipes
             if (j_state > 0) {
                 state_pids.push_back(j_state);
-                std::cout << "creating process " << j_state << std::endl;
+                // std::cout << "creating process " << j_state << std::endl;
             }
             // State logic
             else if (j_state == 0) {
@@ -186,6 +186,18 @@ int main(int argc, char *argv[]) {
     close_sisctrl_ending_pipes(ending_pipes, config);
     close_sisctrl_initial_pipes(initial_pipes, config);
 
+    // Yaml out
+    YAML::Emitter out;
+    sem_t mutex;
+    sem_init(&mutex, 0, 1);
+
+    // Listen to the ending pipes
+    std::thread end_pipes_thread (sisctrl_listen_end_pipes, NUM_AUTOMATA, config, std::ref(ending_pipes), &mutex);
+
+    // Listen to the error pipes
+    std::thread error_pipes_thread (sisctrl_listen_error_pipes, NUM_AUTOMATA, config, std::ref(error_pipes), &mutex);
+
+
     // Write to the initial states
     for (size_t i = 0; i < NUM_AUTOMATA; i++) {
         
@@ -208,20 +220,10 @@ int main(int argc, char *argv[]) {
         
         const char *msg_to_send = out.c_str();
         if (write(initial_pipes[automaton_name][current_start_state][1], msg_to_send, strlen(msg_to_send)) < 0) {
-            std::cerr << "ERROR!: could not wrtie initial message" << std::endl;
+            std::cerr << "ERROR!: could not write initial message" << std::endl;
         }
     }
 
-    // Yaml out
-    YAML::Emitter out;
-    sem_t mutex;
-    sem_init(&mutex, 0, 1);
-
-    // Listen to the ending pipes
-    std::thread end_pipes_thread (sisctrl_listen_end_pipes, NUM_AUTOMATA, config, std::ref(ending_pipes), &mutex);
-
-    // Listen to the error pipes
-    std::thread error_pipes_thread (sisctrl_listen_error_pipes, NUM_AUTOMATA, config, std::ref(error_pipes), &mutex);
 
     end_pipes_thread.join();
     error_pipes_thread.join();
@@ -354,7 +356,7 @@ void propagate_message(std::string &buffer,
     std::string recog = buffer_msg["recog"].as<std::string>();
     std::string rest = buffer_msg["rest"].as<std::string>();
 
-    printf("Automaton %s, state %s (initial), got: %s \n", automaton_name.c_str(), state_name.c_str(), buffer.c_str());
+    // printf("Automaton %s, state %s (initial), got: %s \n", automaton_name.c_str(), state_name.c_str(), buffer.c_str());
     // std::cout << "Automaton " << automaton_name << " state " << state_name << "(initial) got: " << buffer << std::endl;
     // Send the message to the other states
     bool msg_sent = false;
