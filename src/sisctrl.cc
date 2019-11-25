@@ -6,6 +6,8 @@
 #include <cstring>
 #include <map>
 #include <vector>
+#include <thread>
+#include <semaphore.h>
 
 #include <cstdio>
 
@@ -21,9 +23,11 @@ void create_error_pipes(std::map<std::string, std::map<std::string, int[2]>> &er
 void create_ending_pipes(std::map<std::string, std::map<std::string, int[2]>> &error_pipes, std::string automaton_name, std::string state_name);
 void create_initial_pipes(std::map<std::string, std::map<std::string, int[2]>> &initial_pipes, std::string automaton_name, std::string state_name);
 // STATES LOGIC
-void initial_state_logic(std::map<std::string, std::map<std::string, int[2]>> &initial_pipes, std::map<std::string, std::map<std::string, int[2]>> &error_pipes, std::map<std::string, std::map<std::string, int[2]>> &ending_pipes, std::map<std::string, std::vector<Edge>> &transitions, std::string automaton_name, std::string state_name, std::vector<std::string> current_final_states);
-void intermediate_state_logic(std::map<std::string, std::vector<Edge>> &transitions, std::map<std::string, std::map<std::string, int[2]>> &error_pipes, std::map<std::string, std::map<std::string, int[2]>> &ending_pipes, std::string automaton_name, std::string state_name, std::vector<std::string> current_final_states);
+void state_logic(std::map<std::string, std::map<std::string, int[2]>> &initial_pipes, std::map<std::string, std::map<std::string, int[2]>> &error_pipes, std::map<std::string, std::map<std::string, int[2]>> &ending_pipes, std::map<std::string, std::vector<Edge>> &transitions, std::string automaton_name, std::string state_name, std::vector<std::string> current_final_states, bool is_initial);
+void initial_state_logic(std::map<std::string, std::map<std::string, int[2]>> &initial_pipes, std::map<std::string, std::map<std::string, int[2]>> &error_pipes, std::map<std::string, std::map<std::string, int[2]>> &ending_pipes, std::map<std::string, std::vector<Edge>> &transitions, std::string automaton_name, std::string state_name, std::vector<std::string> current_final_states, sem_t *mutex);
+void intermediate_state_logic(std::map<std::string, std::vector<Edge>> &transitions, std::map<std::string, std::map<std::string, int[2]>> &error_pipes, std::map<std::string, std::map<std::string, int[2]>> &ending_pipes, std::string automaton_name, std::string state_name, std::vector<std::string> current_final_states, Edge &trans, sem_t *mutex);
 bool analyze_prefix(std::string trans_msg, std::string buff_msg);
+void propagate_message(std::string &buffer, std::map<std::string, std::map<std::string, int[2]>> &error_pipes, std::map<std::string, std::map<std::string, int[2]>> &ending_pipes, std::map<std::string, std::vector<Edge>> &transitions, std::string automaton_name, std::string state_name, std::vector<std::string> current_final_states, sem_t *mutex);
 
 // SISCTRL PIPE MANAGEMENT
 void close_sisctrl_intern_pipes(std::map<std::string, std::vector<Edge>> &transitions, YAML::Node config);
@@ -32,6 +36,9 @@ void close_sisctrl_ending_pipes(std::map<std::string, std::map<std::string, int[
 void close_sisctrl_initial_pipes(std::map<std::string, std::map<std::string, int[2]>> &initial_pipes, YAML::Node config);
 // SISCTRL LOGIC
 void get_user_input(std::string &input_message);
+void sisctrl_listen_end_pipes(const int NUM_AUTOMATA, YAML::Node config, std::map<std::string, std::map<std::string, int[2]>> &ending_pipes, sem_t *mutex);
+void sisctrl_listen_error_pipes(const int NUM_AUTOMATA, YAML::Node config, std::map<std::string, std::map<std::string, int[2]>> &error_pipes, sem_t *mutex);
+
 
 int main(int argc, char *argv[]) {
 
@@ -150,13 +157,12 @@ int main(int argc, char *argv[]) {
                 if (current_start_state == state_name) {
                     // This is an initial state
                     while (true) {
-                        initial_state_logic(initial_pipes, error_pipes, ending_pipes, transitions, automaton_name, state_name, current_final_states);
-                        intermediate_state_logic(transitions, ending_pipes, error_pipes, automaton_name, state_name, current_final_states);
+                        state_logic(initial_pipes, error_pipes, ending_pipes, transitions, automaton_name, state_name, current_final_states, true);
                     }
                 }
                 else {
                     while (true) {
-                        intermediate_state_logic(transitions, ending_pipes, error_pipes, automaton_name, state_name, current_final_states);
+                        state_logic(initial_pipes, error_pipes, ending_pipes, transitions, automaton_name, state_name, current_final_states, false);
                     }
                 }
 
@@ -206,7 +212,27 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // Yaml out
+    YAML::Emitter out;
+    sem_t mutex;
+    sem_init(&mutex, 0, 1);
+
     // Listen to the ending pipes
+    std::thread end_pipes_thread (sisctrl_listen_end_pipes, NUM_AUTOMATA, config, std::ref(ending_pipes), &mutex);
+
+    // Listen to the error pipes
+    std::thread error_pipes_thread (sisctrl_listen_error_pipes, NUM_AUTOMATA, config, std::ref(error_pipes), &mutex);
+
+    end_pipes_thread.join();
+    error_pipes_thread.join();
+
+    for (int pid : state_pids) {
+        int status;
+        waitpid(pid, &status, 0);
+    }
+}
+
+void sisctrl_listen_end_pipes(const int NUM_AUTOMATA, YAML::Node config, std::map<std::string, std::map<std::string, int[2]>> &ending_pipes, sem_t *mutex) {
     while (true) {
         for (size_t i = 0; i < NUM_AUTOMATA; i++) {
         
@@ -223,22 +249,44 @@ int main(int argc, char *argv[]) {
                     buffer += c;
                 }
                 if (c == '}') {
-                    printf("Sisctrl recieved: %s, from automaton: %s\n", buffer.c_str(), automaton_name.c_str());
+                    // Parse buffer
+                    YAML::Node buff_msg = YAML::Load(buffer);
+                    YAML::Emitter out;
+
+                    // Create acceptance entry
+                    out << YAML::BeginSeq;
+                    out << YAML::BeginMap;
+                    out << YAML::Key << "msgtype";
+                    out << YAML::Value << "accept";
+                    out << YAML::Key << "accept";
+                    out << YAML::Value << YAML::BeginSeq;
+                    out << YAML::BeginMap;
+                    out << YAML::Key << "automata";
+                    out << YAML::Value << automaton_name;
+                    out << YAML::Key << "msg";
+                    out << YAML::Value << buff_msg["recog"];
+                    out << YAML::EndMap << YAML::EndSeq << YAML::EndMap << YAML::EndSeq;
+
+                    sem_wait(mutex);
+                    printf("%s\n", out.c_str());
+                    sem_post(mutex);
                 }
+                c = 0;
             }
         }
     }
+}
 
-    // Listen to the error pipes
+void sisctrl_listen_error_pipes(const int NUM_AUTOMATA, YAML::Node config, std::map<std::string, std::map<std::string, int[2]>> &error_pipes, sem_t *mutex) {
     while (true) {
         for (size_t i = 0; i < NUM_AUTOMATA; i++) {
         
             const int NUM_NODES = config[i]["delta"].size();
             std::string automaton_name = config[i]["automata"].as<std::string>();
             
-            for (size_t j = 0; j < config[i]["states"].size(); j++) {
+            for (size_t j = 0; j < config[i]["delta"].size(); j++) {
 
-                std::string current_state = config[i]["states"][j].as<std::string>();
+                std::string current_state = config[i]["delta"][j]["node"].as<std::string>();
 
                 char c;
                 std::string buffer = "";
@@ -246,15 +294,35 @@ int main(int argc, char *argv[]) {
                     buffer += c;
                 }
                 if (c == '}') {
-                    printf("Sisctrl recieved: %s\n", buffer.c_str());
+                    // Parse buffer
+                    YAML::Node buff_msg = YAML::Load(buffer);
+                    YAML::Emitter out;
+
+                    std::string original_msg = buff_msg["recog"].as<std::string>() + buff_msg["rest"].as<std::string>();
+
+                    // Create acceptance entry
+                    out << YAML::BeginSeq;
+                    out << YAML::BeginMap;
+                    out << YAML::Key << "msgtype";
+                    out << YAML::Value << "reject";
+                    out << YAML::Key << "reject";
+                    out << YAML::Value << YAML::BeginSeq;
+                    out << YAML::BeginMap;
+                    out << YAML::Key << "automata";
+                    out << YAML::Value << automaton_name;
+                    out << YAML::Key << "msg";
+                    out << YAML::Value << original_msg;
+                    out << YAML::Key << "pos";
+                    out << YAML::Value << buff_msg["recog"].as<std::string>().length() - 1;
+                    out << YAML::EndMap << YAML::EndSeq << YAML::EndMap << YAML::EndSeq;
+
+                    sem_wait(mutex);
+                    printf("%s\n", out.c_str());
+                    sem_post(mutex);
                 }
+                c = 0;
             }
         }
-    }
-
-    for (int pid : state_pids) {
-        int status;
-        waitpid(pid, &status, 0);
     }
 }
 
@@ -273,6 +341,134 @@ bool analyze_prefix(std::string trans_msg, std::string buff_msg) {
     }
 }
 
+void propagate_message(std::string &buffer,  
+                       std::map<std::string, std::map<std::string, int[2]>> &error_pipes,
+                       std::map<std::string, std::map<std::string, int[2]>> &ending_pipes,
+                       std::map<std::string, std::vector<Edge>> &transitions,
+                       std::string automaton_name,
+                       std::string state_name,
+                       std::vector<std::string> current_final_states, 
+                       sem_t *mutex) {
+    
+    YAML::Node buffer_msg = YAML::Load(buffer);
+    std::string recog = buffer_msg["recog"].as<std::string>();
+    std::string rest = buffer_msg["rest"].as<std::string>();
+
+    printf("Automaton %s, state %s (initial), got: %s \n", automaton_name.c_str(), state_name.c_str(), buffer.c_str());
+    // std::cout << "Automaton " << automaton_name << " state " << state_name << "(initial) got: " << buffer << std::endl;
+    // Send the message to the other states
+    bool msg_sent = false;
+    for (Edge &trans : transitions[automaton_name]) {
+        if (trans.origin == state_name) {
+            if (analyze_prefix(trans.message, rest) == true) {
+                // read the rest prefix into recog
+                std::string new_recog = recog + rest.substr(0, trans.message.length());
+                std::string new_rest = rest.substr(trans.message.length(), rest.length());
+                // generate Yaml
+                YAML::Emitter out;
+                out << YAML::Flow;
+                out << YAML::BeginMap;
+                out << YAML::Key << "recog";
+                out << YAML::Value << new_recog;
+                out << YAML::Key << "rest";
+                out << YAML::Value << new_rest;
+                out << YAML::EndMap;
+                const char *msg_to_send = out.c_str();
+                // Lock the mutex
+                sem_wait(mutex);
+                write(trans.pip[1], msg_to_send, strlen(msg_to_send));
+                sem_post(mutex);
+                // Unlock
+                msg_sent = true;
+                break;
+            }
+        }
+    }
+
+    bool am_i_final = false;
+    for (std::string final_state : current_final_states) {
+        if (final_state == state_name) {
+            am_i_final = true;
+        }
+    }
+
+    if (am_i_final && rest == "") {
+
+        // generate Yaml
+        YAML::Emitter out;
+        out << YAML::Flow;
+        out << YAML::BeginMap;
+        out << YAML::Key << "codterm";
+        out << YAML::Value << 0;
+        out << YAML::Key << "recog";
+        out << YAML::Value << recog;
+        out << YAML::Key << "rest";
+        out << YAML::Value << rest;
+        out << YAML::EndMap;
+        const char *msg_to_send = out.c_str();
+        // Lock the mutex
+        sem_wait(mutex);
+        write(ending_pipes[automaton_name][state_name][1], msg_to_send, strlen(msg_to_send));
+        sem_post(mutex);
+        // unlock
+        msg_sent = true;
+    }
+
+    if (!msg_sent) {
+        YAML::Emitter out;
+        out << YAML::Flow;
+        out << YAML::BeginMap;
+        out << YAML::Key << "codterm";
+        out << YAML::Value << 1;
+        out << YAML::Key << "recog";
+        out << YAML::Value << recog;
+        out << YAML::Key << "rest";
+        out << YAML::Value << rest;
+        out << YAML::EndMap;
+        const char *msg_to_send = out.c_str();
+        // Lock mutex
+        sem_wait(mutex);
+        if (write(error_pipes[automaton_name][state_name][1], msg_to_send, strlen(msg_to_send)) < 0) {
+            std::cerr << "ERROR!: could not write to error pipe" << std::endl;
+        }
+        sem_post(mutex);
+        // unlock
+    }
+}
+
+void state_logic(std::map<std::string, std::map<std::string, int[2]>> &initial_pipes, 
+                 std::map<std::string, std::map<std::string, int[2]>> &error_pipes,
+                 std::map<std::string, std::map<std::string, int[2]>> &ending_pipes,
+                 std::map<std::string, std::vector<Edge>> &transitions,
+                 std::string automaton_name,
+                 std::string state_name,
+                 std::vector<std::string> current_final_states, 
+                 bool is_initial) {
+
+    std::vector<std::thread> state_threads;
+    sem_t mutex;
+    sem_init(&mutex, 0, 1);
+
+    // Init state logic
+    if (is_initial) {
+        // create the init thread
+        std::thread init_thread(initial_state_logic, std::ref(initial_pipes), std::ref(error_pipes), std::ref(ending_pipes), std::ref(transitions), automaton_name, state_name, current_final_states, &mutex);
+        state_threads.push_back(std::move(init_thread));
+    }
+
+    // Intermediate state logic
+    for (Edge &trans : transitions[automaton_name]) {
+        if (trans.destination == state_name) {
+            std::thread inter_thread(intermediate_state_logic, std::ref(transitions), std::ref(ending_pipes), std::ref(error_pipes), automaton_name, state_name, current_final_states, std::ref(trans), &mutex);
+            state_threads.push_back(std::move(inter_thread));
+        }
+    }
+
+    for (std::thread &t : state_threads) {
+        t.join();
+    }
+
+}
 
 void initial_state_logic(std::map<std::string, std::map<std::string, int[2]>> &initial_pipes, 
                          std::map<std::string, std::map<std::string, int[2]>> &error_pipes,
@@ -280,7 +476,8 @@ void initial_state_logic(std::map<std::string, std::map<std::string, int[2]>> &i
                          std::map<std::string, std::vector<Edge>> &transitions,
                          std::string automaton_name,
                          std::string state_name,
-                         std::vector<std::string> current_final_states) {
+                         std::vector<std::string> current_final_states,
+                         sem_t *mutex) {
 
     char c;
     std::string buffer = "";
@@ -289,84 +486,11 @@ void initial_state_logic(std::map<std::string, std::map<std::string, int[2]>> &i
         buffer += c;
     }
     if (c == '}') {
-
-        YAML::Node buffer_msg = YAML::Load(buffer);
-        std::string recog = buffer_msg["recog"].as<std::string>();
-        std::string rest = buffer_msg["rest"].as<std::string>();
-
-        printf("Automaton %s, state %s (initial), got: %s \n", automaton_name.c_str(), state_name.c_str(), buffer.c_str());
-        // std::cout << "Automaton " << automaton_name << " state " << state_name << "(initial) got: " << buffer << std::endl;
-        // Send the message to the other states
-        bool msg_sent = false;
-        for (Edge &trans : transitions[automaton_name]) {
-            if (trans.origin == state_name) {
-                if (analyze_prefix(trans.message, rest) == true) {
-                    // read the rest prefix into recog
-                    std::string new_recog = recog + rest.substr(0, trans.message.length());
-                    std::string new_rest = rest.substr(trans.message.length(), rest.length());
-                    // generate Yaml
-                    YAML::Emitter out;
-                    out << YAML::Flow;
-                    out << YAML::BeginMap;
-                    out << YAML::Key << "recog";
-                    out << YAML::Value << new_recog;
-                    out << YAML::Key << "rest";
-                    out << YAML::Value << new_rest;
-                    out << YAML::EndMap;
-                    const char *msg_to_send = out.c_str();
-                    write(trans.pip[1], msg_to_send, strlen(msg_to_send));
-                    msg_sent = true;
-                    break;
-                }
-            }
-        }
-
-        bool am_i_final = false;
-        for (std::string final_state : current_final_states) {
-            if (final_state == state_name) {
-                am_i_final = true;
-            }
-        }
-
-        if (am_i_final && rest == "") {
-
-            // generate Yaml
-            YAML::Emitter out;
-            out << YAML::Flow;
-            out << YAML::BeginMap;
-            out << YAML::Key << "codterm";
-            out << YAML::Value << 0;
-            out << YAML::Key << "recog";
-            out << YAML::Value << recog;
-            out << YAML::Key << "rest";
-            out << YAML::Value << rest;
-            out << YAML::EndMap;
-            const char *msg_to_send = out.c_str();
-            write(ending_pipes[automaton_name][state_name][1], msg_to_send, strlen(msg_to_send));
-            msg_sent = true;
-        }
-
-        if (!msg_sent) {
-            YAML::Emitter out;
-            out << YAML::Flow;
-            out << YAML::BeginMap;
-            out << YAML::Key << "codterm";
-            out << YAML::Value << 1;
-            out << YAML::Key << "recog";
-            out << YAML::Value << recog;
-            out << YAML::Key << "rest";
-            out << YAML::Value << rest;
-            out << YAML::EndMap;
-            const char *msg_to_send = out.c_str();
-            if (write(error_pipes[automaton_name][state_name][1], msg_to_send, strlen(msg_to_send)) < 0) {
-                std::cerr << "ERROR!: could not write to error pipe" << std::endl;
-            }
-        }
-
-        // flush the buffer
+        propagate_message(buffer, error_pipes, ending_pipes, transitions, automaton_name, state_name, current_final_states, mutex);
         c = 0;
         buffer = "";
     }
+
 }
 
 void intermediate_state_logic(std::map<std::string, std::vector<Edge>> &transitions, 
@@ -374,96 +498,20 @@ void intermediate_state_logic(std::map<std::string, std::vector<Edge>> &transiti
                               std::map<std::string, std::map<std::string, int[2]>> &error_pipes,
                               std::string automaton_name,
                               std::string state_name, 
-                              std::vector<std::string> current_final_states) {
+                              std::vector<std::string> current_final_states, 
+                              Edge &trans, 
+                              sem_t *mutex) {
 
-    for (Edge &trans : transitions[automaton_name]) {
-        if (trans.destination == state_name) {
-            char c;
-            std::string buffer = "";
-            while (read(trans.pip[0], &c, 1) > 0) {
-                buffer += c;
-            }
-            if (c == '}') {
-
-                printf("Automaton %s, state %s, got: %s\n", automaton_name.c_str(), state_name.c_str(), buffer.c_str());
-
-                YAML::Node buffer_msg = YAML::Load(buffer);
-                std::string recog = buffer_msg["recog"].as<std::string>();
-                std::string rest = buffer_msg["rest"].as<std::string>();
-
-                bool msg_sent = false;
-
-                for (Edge &inner_trans : transitions[automaton_name]) {
-                    if (inner_trans.origin == state_name) {
-                        if (analyze_prefix(inner_trans.message, rest) == true) {
-                            // read the rest prefix into recog
-                            std::string new_recog = recog + rest.substr(0, inner_trans.message.length());
-                            std::string new_rest = rest.substr(inner_trans.message.length(), rest.length());
-                            // generate Yaml
-                            YAML::Emitter out;
-                            out << YAML::Flow;
-                            out << YAML::BeginMap;
-                            out << YAML::Key << "recog";
-                            out << YAML::Value << new_recog;
-                            out << YAML::Key << "rest";
-                            out << YAML::Value << new_rest;
-                            out << YAML::EndMap;
-                            const char *msg_to_send = out.c_str();
-                            write(inner_trans.pip[1], msg_to_send, strlen(msg_to_send));
-                            msg_sent = true;
-                            break;
-                        }
-                    }
-                }
-
-                bool am_i_final = false;
-                for (std::string final_state : current_final_states) {
-                    if (final_state == state_name) {
-                        am_i_final = true;
-                    }
-                }
-
-                if (am_i_final && rest == "") {
-
-                    // generate Yaml
-                    YAML::Emitter out;
-                    out << YAML::Flow;
-                    out << YAML::BeginMap;
-                    out << YAML::Key << "codterm";
-                    out << YAML::Value << 0;
-                    out << YAML::Key << "recog";
-                    out << YAML::Value << recog;
-                    out << YAML::Key << "rest";
-                    out << YAML::Value << rest;
-                    out << YAML::EndMap;
-                    const char *msg_to_send = out.c_str();
-                    write(ending_pipes[automaton_name][state_name][1], msg_to_send, strlen(msg_to_send));
-                    msg_sent = true;
-                }
-
-                if (!msg_sent) {
-                    YAML::Emitter out;
-                    out << YAML::Flow;
-                    out << YAML::BeginMap;
-                    out << YAML::Key << "codterm";
-                    out << YAML::Value << 1;
-                    out << YAML::Key << "recog";
-                    out << YAML::Value << recog;
-                    out << YAML::Key << "rest";
-                    out << YAML::Value << rest;
-                    out << YAML::EndMap;
-                    const char *msg_to_send = out.c_str();
-                    if (write(error_pipes[automaton_name][state_name][1], msg_to_send, strlen(msg_to_send)) < 0) {
-                        std::cerr << "ERROR!: could not write to error pipe" << std::endl;
-                    }
-                }
-
-                // flush the buffer
-                c = 0;
-                buffer = "";
-
-            }
-        }
+    char c;
+    std::string buffer = "";
+    while (read(trans.pip[0], &c, 1) > 0) {
+        buffer += c;
+    }
+    if (c == '}') {
+        propagate_message(buffer, error_pipes, ending_pipes, transitions, automaton_name, state_name, current_final_states, mutex);
+        // flush the buffer
+        c = 0;
+        buffer = "";
     }
 }
 

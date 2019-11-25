@@ -1,7 +1,7 @@
 all: src/sisctrl
 
-CXXFLAGS=-g
-LDFLAGS=-lyaml-cpp
+CXXFLAGS=-g -std=c++11
+LDFLAGS=-lyaml-cpp -pthread
 
 INVOICE_OBJECTS=src/sisctrl.o
 
